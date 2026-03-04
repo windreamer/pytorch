@@ -1571,6 +1571,7 @@ class TestWindowsNinjaResponseFile(common.TestCase):
     """Tests that Windows ninja builds use response files for linking."""
 
     def test_write_ninja_file_uses_rspfile_on_windows(self):
+        """JIT code path: _write_ninja_file with library_target generates rspfile rules."""
         from torch.utils.cpp_extension import _write_ninja_file
 
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1604,6 +1605,93 @@ class TestWindowsNinjaResponseFile(common.TestCase):
             with open(ninja_file) as f:
                 content = f.read()
 
+            self.assertIn('rspfile = $out.rsp', content)
+            self.assertIn('rspfile_content = $in_newline', content)
+            self.assertIn('@$out.rsp', content)
+
+    def test_write_ninja_file_no_rspfile_compile_only(self):
+        """AOT compile path: _write_ninja_file without library_target emits no rspfile."""
+        from torch.utils.cpp_extension import _write_ninja_file
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            ninja_file = os.path.join(tmp_dir, 'build.ninja')
+
+            with unittest.mock.patch('torch.utils.cpp_extension.IS_WINDOWS', True):
+                _write_ninja_file(
+                    path=ninja_file,
+                    cflags=[],
+                    post_cflags=[],
+                    cuda_cflags=None,
+                    cuda_post_cflags=None,
+                    cuda_dlink_post_cflags=None,
+                    sycl_cflags=None,
+                    sycl_post_cflags=None,
+                    sycl_dlink_post_cflags=None,
+                    sources=['foo.cpp'],
+                    objects=['foo.obj'],
+                    ldflags=[],
+                    library_target=None,
+                    with_cuda=False,
+                    with_sycl=False,
+                )
+
+            with open(ninja_file) as f:
+                content = f.read()
+
+            self.assertNotIn('rspfile', content)
+            self.assertNotIn('@$out.rsp', content)
+
+    def test_win_wrap_ninja_link_uses_rspfile(self):
+        """AOT link path: win_wrap_ninja_link generates a ninja file with rspfile rules."""
+        import io
+        import distutils.dist
+        from torch.utils.cpp_extension import BuildExtension
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dist = distutils.dist.Distribution()
+            ext_build = BuildExtension(dist)
+            ext_build.use_ninja = True
+            ext_build.extensions = []
+            ext_build.build_temp = tmp_dir
+
+            mock_compiler = unittest.mock.MagicMock()
+            mock_compiler.initialized = True
+            mock_compiler.compiler_type = 'msvc'
+            mock_compiler.src_extensions = ['.cpp', '.c']
+            mock_compiler._cpp_extensions = []
+            mock_compiler.linker = '/fake/link.exe'
+            mock_compiler._fix_lib_args.return_value = ([], [], [])
+            ext_build.compiler = mock_compiler
+
+            # Run build_extensions() to install win_wrap_ninja_link as link_shared_object.
+            with (
+                unittest.mock.patch.object(ext_build, '_check_abi', return_value=('cl', '19')),
+                unittest.mock.patch('torch.utils.cpp_extension.build_ext.build_extensions'),
+            ):
+                ext_build.build_extensions()
+
+            # Capture the ninja file written by win_wrap_ninja_link.
+            written_content = []
+            real_open = open
+
+            def capture_open(path, *args, **kwargs):
+                if path.endswith('build.ninja'):
+                    buf = io.StringIO()
+                    written_content.append(buf)
+                    return buf
+                return real_open(path, *args, **kwargs)
+
+            with (
+                unittest.mock.patch('builtins.open', side_effect=capture_open),
+                unittest.mock.patch('os.makedirs'),
+                unittest.mock.patch('torch.utils.cpp_extension._run_ninja_build'),
+            ):
+                mock_compiler.link_shared_object(
+                    ['foo.obj'], 'foo.pyd', output_dir=tmp_dir
+                )
+
+            self.assertEqual(len(written_content), 1)
+            content = written_content[0].getvalue()
             self.assertIn('rspfile = $out.rsp', content)
             self.assertIn('rspfile_content = $in_newline', content)
             self.assertIn('@$out.rsp', content)
