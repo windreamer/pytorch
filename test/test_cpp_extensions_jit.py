@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 import warnings
 
 import torch
@@ -1565,6 +1566,47 @@ except RuntimeError as e:
                         f"Did not expect 'C++ CapturedTraceback:' in error message when TORCH_SHOW_CPP_STACKTRACES=0, got: {error_message}",  # noqa: B950
                     )
 
+
+class TestWindowsNinjaResponseFile(common.TestCase):
+    """Tests that Windows ninja builds use response files for linking."""
+
+    def test_write_ninja_file_uses_rspfile_on_windows(self):
+        from torch.utils.cpp_extension import _write_ninja_file
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            ninja_file = os.path.join(tmp_dir, 'build.ninja')
+
+            with (
+                unittest.mock.patch('torch.utils.cpp_extension.IS_WINDOWS', True),
+                unittest.mock.patch(
+                    'subprocess.check_output',
+                    return_value=b"/usr/bin/fake_cl.exe\r\n",
+                ),
+            ):
+                _write_ninja_file(
+                    path=ninja_file,
+                    cflags=[],
+                    post_cflags=[],
+                    cuda_cflags=None,
+                    cuda_post_cflags=None,
+                    cuda_dlink_post_cflags=None,
+                    sycl_cflags=None,
+                    sycl_post_cflags=None,
+                    sycl_dlink_post_cflags=None,
+                    sources=['foo.cpp'],
+                    objects=['foo.obj'],
+                    ldflags=[],
+                    library_target='foo.dll',
+                    with_cuda=False,
+                    with_sycl=False,
+                )
+
+            with open(ninja_file) as f:
+                content = f.read()
+
+            self.assertIn('rspfile = $out.rsp', content)
+            self.assertIn('rspfile_content = $in_newline', content)
+            self.assertIn('@$out.rsp', content)
 
 if __name__ == "__main__":
     common.run_tests()
