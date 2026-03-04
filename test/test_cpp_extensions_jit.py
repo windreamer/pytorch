@@ -23,6 +23,7 @@ from torch.testing._internal.common_utils import gradcheck, TEST_XPU
 from torch.utils.cpp_extension import (
     _get_cuda_arch_flags,
     _TORCH_PATH,
+    _write_ninja_file,
     check_compiler_is_gcc,
     CUDA_HOME,
     get_cxx_compiler,
@@ -1564,6 +1565,103 @@ except RuntimeError as e:
                         error_message,
                         f"Did not expect 'C++ CapturedTraceback:' in error message when TORCH_SHOW_CPP_STACKTRACES=0, got: {error_message}",  # noqa: B950
                     )
+
+
+    @unittest.skipIf(not IS_WINDOWS, "Windows-specific test")
+    def test_ninja_link_rule_uses_rspfile_jit(self):
+        """JIT path: _write_ninja_file should use response file for Windows linking."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ninja_file = os.path.join(tmpdir, "build.ninja")
+            source = os.path.join(tmpdir, "foo.cpp")
+            with open(source, "w"):
+                pass
+            _write_ninja_file(
+                path=ninja_file,
+                cflags=[],
+                post_cflags=None,
+                cuda_cflags=None,
+                cuda_post_cflags=None,
+                cuda_dlink_post_cflags=None,
+                sycl_cflags=None,
+                sycl_post_cflags=None,
+                sycl_dlink_post_cflags=None,
+                sources=[source],
+                objects=["foo.o"],
+                ldflags=[],
+                library_target="foo.pyd",
+                with_cuda=False,
+                with_sycl=False,
+            )
+            with open(ninja_file) as f:
+                content = f.read()
+            self.assertIn("rspfile = $out.rsp", content)
+            self.assertIn("rspfile_content = $in", content)
+            self.assertIn("@$out.rsp", content)
+            # $in must NOT appear directly in the link command
+            link_command_line = [
+                line for line in content.splitlines()
+                if line.strip().startswith("command") and "link.exe" in line
+            ]
+            self.assertEqual(len(link_command_line), 1)
+            self.assertNotIn(" $in ", link_command_line[0])
+
+    @unittest.skipIf(not IS_WINDOWS, "Windows-specific test")
+    def test_ninja_link_rule_uses_rspfile_aot(self):
+        """AOT path: _write_ninja_file with library_target=None (compile only) should
+        not emit a link rule; when library_target is given, it must use rspfile."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Compile-only invocation (AOT win_wrap_ninja_compile passes library_target=None)
+            ninja_file_compile = os.path.join(tmpdir, "compile.ninja")
+            source = os.path.join(tmpdir, "bar.cpp")
+            with open(source, "w"):
+                pass
+            _write_ninja_file(
+                path=ninja_file_compile,
+                cflags=[],
+                post_cflags=None,
+                cuda_cflags=None,
+                cuda_post_cflags=None,
+                cuda_dlink_post_cflags=None,
+                sycl_cflags=None,
+                sycl_post_cflags=None,
+                sycl_dlink_post_cflags=None,
+                sources=[source],
+                objects=["bar.o"],
+                ldflags=None,
+                library_target=None,
+                with_cuda=False,
+                with_sycl=False,
+            )
+            with open(ninja_file_compile) as f:
+                compile_content = f.read()
+            # No link rule expected for compile-only invocation
+            self.assertNotIn("link.exe", compile_content)
+            self.assertNotIn("rspfile", compile_content)
+
+            # Full build invocation (JIT _write_ninja_file_to_build_library passes library_target)
+            ninja_file_link = os.path.join(tmpdir, "link.ninja")
+            _write_ninja_file(
+                path=ninja_file_link,
+                cflags=[],
+                post_cflags=None,
+                cuda_cflags=None,
+                cuda_post_cflags=None,
+                cuda_dlink_post_cflags=None,
+                sycl_cflags=None,
+                sycl_post_cflags=None,
+                sycl_dlink_post_cflags=None,
+                sources=[source],
+                objects=["bar.o"],
+                ldflags=[],
+                library_target="bar.pyd",
+                with_cuda=False,
+                with_sycl=False,
+            )
+            with open(ninja_file_link) as f:
+                link_content = f.read()
+            self.assertIn("rspfile = $out.rsp", link_content)
+            self.assertIn("rspfile_content = $in", link_content)
+            self.assertIn("@$out.rsp", link_content)
 
 
 if __name__ == "__main__":
