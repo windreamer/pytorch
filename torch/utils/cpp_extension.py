@@ -1244,7 +1244,10 @@ class BuildExtension(build_ext):
             library_target_escaped = library_target.replace(':', '$:')
             objs = [os.path.abspath(o).replace(':', '$:') for o in objects]
             ld_args_str = ' '.join(ld_args)
-            linker = f'"{self.compiler.linker}"'
+            linker_path = getattr(self.compiler, 'linker', None)
+            if not linker_path:
+                raise RuntimeError("MSVC linker not found. Ensure MSVC is installed and initialized.")
+            linker = f'"{linker_path}"'
 
             ninja_content = '\n'.join([
                 'rule link',
