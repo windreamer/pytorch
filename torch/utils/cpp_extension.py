@@ -3183,7 +3183,12 @@ e.
                 cl_path = os.path.dirname(cl_paths[0]).replace(':', '$:')
             else:
                 raise RuntimeError("MSVC is required to load C++ extensions")
-            link_rule.append(f'  command = "{cl_path}/link.exe" $in /nologo $ldflags /out:$out')
+            # Use a response file to avoid the 32KB Windows command-line length limit
+            # when there are many object files. Ninja writes all inputs to $out.rsp
+            # and the linker reads them via @$out.rsp.
+            link_rule.append(f'  command = "{cl_path}/link.exe" /nologo $ldflags /out:$out @$out.rsp')
+            link_rule.append('  rspfile = $out.rsp')
+            link_rule.append('  rspfile_content = $in')
         else:
             link_rule.append('  command = $cxx $in $ldflags -o $out')
 
