@@ -1194,11 +1194,85 @@ class BuildExtension(build_ext):
 
             # Return *all* object filenames, not just the ones we just built.
             return objects
+
+        def win_wrap_ninja_link(
+                objects, output_filename, output_dir=None, libraries=None,
+                library_dirs=None, runtime_library_dirs=None,
+                export_symbols=None, debug=None, extra_preargs=None,
+                extra_postargs=None, build_temp=None, target_lang=None):
+            if not self.compiler.initialized:
+                self.compiler.initialize()
+
+            library_target = os.path.abspath(
+                output_filename if output_dir is None
+                else os.path.join(output_dir, output_filename)
+            )
+            self.compiler.mkpath(os.path.dirname(library_target))
+
+            libraries, library_dirs, runtime_library_dirs = self.compiler._fix_lib_args(
+                libraries, library_dirs, runtime_library_dirs
+            )
+
+            ld_args = []
+            for d in library_dirs:
+                ld_args.append(f'/LIBPATH:"{d}"')
+            for lib in libraries:
+                lib_dir, lib_name = os.path.split(lib)
+                if lib_dir:
+                    lib_file = self.compiler.find_library_file([lib_dir], lib_name)
+                    if lib_file:
+                        ld_args.append(lib_file)
+                else:
+                    ld_args.append(self.compiler.library_option(lib))
+
+            if export_symbols:
+                dll_name = os.path.splitext(os.path.basename(output_filename))[0]
+                link_temp = build_temp or self.build_temp
+                implib_file = os.path.abspath(
+                    os.path.join(link_temp, self.compiler.library_filename(dll_name))
+                )
+                for sym in export_symbols:
+                    ld_args.append(f'/EXPORT:{sym}')
+                ld_args.append(f'/IMPLIB:"{implib_file}"')
+
+            ext_base = os.path.splitext(os.path.basename(output_filename))[0]
+            link_build_dir = os.path.join(
+                build_temp or self.build_temp, f'_link_{ext_base}'
+            )
+            os.makedirs(link_build_dir, exist_ok=True)
+
+            library_target_escaped = library_target.replace(':', '$:')
+            objs = [os.path.abspath(o).replace(':', '$:') for o in objects]
+            ld_args_str = ' '.join(ld_args)
+            linker_path = getattr(self.compiler, 'linker', None)
+            if not linker_path:
+                raise RuntimeError("MSVC linker not found. Ensure MSVC is installed and initialized.")
+            linker = f'"{linker_path}"'
+
+            ninja_content = '\n'.join([
+                'rule link',
+                f'  command = {linker} /nologo /DLL /MANIFEST:EMBED,ID=2 /MANIFESTUAC:NO {ld_args_str} /out:$out @$out.rsp',
+                '  rspfile = $out.rsp',
+                '  rspfile_content = $in_newline',
+                '',
+                f'build {library_target_escaped}: link {" ".join(objs)}',
+                f'default {library_target_escaped}',
+                '',
+            ])
+
+            with open(os.path.join(link_build_dir, 'build.ninja'), 'w') as f:
+                f.write(ninja_content)
+
+            _run_ninja_build(
+                link_build_dir, verbose=True, error_prefix='Error linking extension'
+            )
+
         # Monkey-patch the _compile or compile method.
         # https://github.com/python/cpython/blob/dc0284ee8f7a270b6005467f26d8e5773d76e959/Lib/distutils/ccompiler.py#L511  # codespell:ignore
         if self.compiler.compiler_type == 'msvc':
             if self.use_ninja:
                 self.compiler.compile = win_wrap_ninja_compile
+                self.compiler.link_shared_object = win_wrap_ninja_link
             else:
                 self.compiler.compile = win_wrap_single_compile
         else:
@@ -3093,12 +3167,19 @@ e.
     # See https://ninja-build.org/build.ninja.html for reference.
     compile_rule = ['rule compile']
     if IS_WINDOWS:
-        compiler_name = "$cxx" if IS_HIP_EXTENSION else "cl"
-        compile_rule.append(
-            f'  command = {compiler_name} '
-            '/showIncludes $cflags -c $in /Fo$out $post_cflags'  # codespell:ignore
-        )
-        if not IS_HIP_EXTENSION:
+        if IS_HIP_EXTENSION:
+            compile_rule.append(
+                '  command = $cxx '
+                '/showIncludes $cflags -c $in /Fo$out $post_cflags'  # codespell:ignore
+            )
+        else:
+            # Use a response file to avoid the 32KB Windows command-line length limit
+            # when there are many include paths or preprocessor defines.
+            compile_rule.append(
+                '  command = cl /showIncludes @$out.rsp /Fo$out'  # codespell:ignore
+            )
+            compile_rule.append('  rspfile = $out.rsp')
+            compile_rule.append('  rspfile_content = $cflags -c $in $post_cflags')
             compile_rule.append('  deps = msvc')
     else:
         compile_rule.append(
@@ -3183,7 +3264,9 @@ e.
                 cl_path = os.path.dirname(cl_paths[0]).replace(':', '$:')
             else:
                 raise RuntimeError("MSVC is required to load C++ extensions")
-            link_rule.append(f'  command = "{cl_path}/link.exe" $in /nologo $ldflags /out:$out')
+            link_rule.append(f'  command = "{cl_path}/link.exe" @$out.rsp /nologo $ldflags /out:$out')
+            link_rule.append('  rspfile = $out.rsp')
+            link_rule.append('  rspfile_content = $in_newline')
         else:
             link_rule.append('  command = $cxx $in $ldflags -o $out')
 
