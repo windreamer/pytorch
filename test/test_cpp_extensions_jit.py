@@ -1609,8 +1609,8 @@ class TestWindowsNinjaResponseFile(common.TestCase):
             self.assertIn('rspfile_content = $in_newline', content)
             self.assertIn('@$out.rsp', content)
 
-    def test_write_ninja_file_no_rspfile_compile_only(self):
-        """AOT compile path: _write_ninja_file without library_target emits no rspfile."""
+    def test_write_ninja_file_compile_only_uses_rspfile(self):
+        """AOT compile path: _write_ninja_file without library_target uses rspfile for compile rule."""
         from torch.utils.cpp_extension import _write_ninja_file
 
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1638,8 +1638,12 @@ class TestWindowsNinjaResponseFile(common.TestCase):
             with open(ninja_file) as f:
                 content = f.read()
 
-            self.assertNotIn('rspfile', content)
-            self.assertNotIn('@$out.rsp', content)
+            # Compile rule uses rspfile to avoid Windows command-line length limit.
+            self.assertIn('rspfile = $out.rsp', content)
+            self.assertIn('rspfile_content = $cflags -c $in $post_cflags', content)
+            self.assertIn('@$out.rsp', content)
+            # No link rule is emitted when library_target is None.
+            self.assertNotIn('rule link', content)
 
     def test_win_wrap_ninja_link_uses_rspfile(self):
         """AOT link path: win_wrap_ninja_link generates a ninja file with rspfile rules."""

@@ -3167,12 +3167,19 @@ e.
     # See https://ninja-build.org/build.ninja.html for reference.
     compile_rule = ['rule compile']
     if IS_WINDOWS:
-        compiler_name = "$cxx" if IS_HIP_EXTENSION else "cl"
-        compile_rule.append(
-            f'  command = {compiler_name} '
-            '/showIncludes $cflags -c $in /Fo$out $post_cflags'  # codespell:ignore
-        )
-        if not IS_HIP_EXTENSION:
+        if IS_HIP_EXTENSION:
+            compile_rule.append(
+                '  command = $cxx '
+                '/showIncludes $cflags -c $in /Fo$out $post_cflags'  # codespell:ignore
+            )
+        else:
+            # Use a response file to avoid the 32KB Windows command-line length limit
+            # when there are many include paths or preprocessor defines.
+            compile_rule.append(
+                '  command = cl /showIncludes @$out.rsp /Fo$out'  # codespell:ignore
+            )
+            compile_rule.append('  rspfile = $out.rsp')
+            compile_rule.append('  rspfile_content = $cflags -c $in $post_cflags')
             compile_rule.append('  deps = msvc')
     else:
         compile_rule.append(
